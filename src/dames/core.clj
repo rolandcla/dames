@@ -16,6 +16,13 @@
   (and (<= 0 r 9)
        (<= 0 c 9)))
 
+(defn echange [damier pos1 pos2]
+  (let [x (get-in damier pos1)
+        y (get-in damier pos2)]
+    (-> damier
+        (assoc-in pos1 y)
+        (assoc-in pos2 x))))
+
 (defn pion? [x]
   (or (= x \n) (= x \b)))
 
@@ -56,35 +63,16 @@
 (def DIR_NE [-1 1])
 (def DIR_NO [-1 -1])
 
+(def DIRS [DIR_SE DIR_SO DIR_NE DIR_NO])
+(def DIRS_N [DIR_NE DIR_NO])
+(def DIRS_S [DIR_SE DIR_SO])
+
 (defn get-diag [damier depart dir]
   (let [[ri ci] dir]
     (->> (iterate (fn [[r c]] [(+ r ri) (+ c ci)]) depart)
          (take-while (fn [pos] (dans-damier? pos)))
          ;;(map (fn [pos] (get-in damier pos)))
          )))
-
-(defn coups [damier positions]
-  (when (seq positions)
-    (let [px (first positions)
-          x (get-in damier px)]
-      (cond (pion? x)
-            (let [[py pz] (rest positions)
-                  y (when py (get-in damier py))
-                  z (when pz (get-in damier pz))]
-              (cond (and (autre-couleur? x y) (libre? z)) [[1 pz [py]]]
-                    (libre? y)                            [[0 py []]]))
-            (dame? x)
-            (or (->> (rest positions)
-                     (drop-while (fn [pos] (libre? (get-in damier pos))))
-                     ((fn [[py & pzs]]
-                         (let [y (get-in damier py)]
-                           (when (autre-couleur? x y)
-                             (->> (take-while (fn [pos] (libre? (get-in damier pos))) pzs)
-                                  (map (fn [pos] [1 pos [py]])))))))
-                     seq)
-                (->> (take-while (fn [pos] (libre? (get-in damier pos))) positions)
-                     (map (fn [pos] [0 pos []]))))))))
-
 
 (defn coups-dame [damier diago]
   (let [[px & pos_suivantes] diago
@@ -95,23 +83,134 @@
                 (let [y (get-in damier py)]
                   (when (autre-couleur? x y)
                     (->> (take-while (fn [pos] (libre? (get-in damier pos))) pzs)
-                         (map (fn [pos] [1 pos [py]])))))))
+                         (map (fn [pos] [pos py])))))))
              seq)
         (->> pos_suivantes
              (take-while (fn [pos] (libre? (get-in damier pos))))
-             (map (fn [pos] [0 pos []]))))))
+             (map (fn [pos] [pos nil]))))))
+
+(defn prise-dame [damier diago]
+  (let [[px & pos_suivantes] diago
+        x (get-in damier px)]
+    (->> pos_suivantes
+         (drop-while (fn [pos] (libre? (get-in damier pos))))
+         ((fn [[py & pzs]]
+            (let [y (get-in damier py)]
+              (when (autre-couleur? x y)
+                (->> (take-while (fn [pos] (libre? (get-in damier pos))) pzs)
+                     (map (fn [pos] [pos py])))))))
+         seq)
+    ))
+
+(defn depl-dame [damier diago]
+  (let [[px & pos_suivantes] diago]
+    (->> pos_suivantes
+         (take-while (fn [pos] (libre? (get-in damier pos))))
+         (map (fn [pos] [[px pos] #{}])))))
+
+
 
 (defn prise-pion [damier diago]
   (let [[px py pz] diago
         x (get-in damier px)
         y (when py (get-in damier py))
         z (when pz (get-in damier pz))]
-    (when (and (autre-couleur? x y) (libre? z)) [[1 pz [py]]])))
+    (when (and (autre-couleur? x y) (libre? z)) [[pz py]])))
 
 (defn depl-pion [damier diago]
   (let [[px py] diago
         y (when py (get-in damier py))]
-    (when (libre? y) [[0 py []]])))
+    (when (libre? y) [[[px py] #{}]])))
+
+(defn rafle-pion [damier depart trajet prises]
+  #_(println ">" depart trajet prises)
+  (->> DIRS
+       (map (fn [dir] (get-diag damier depart dir)))
+       (map (fn [diago] (prise-pion damier diago)))
+       (remove nil?)
+       (apply concat)
+       (remove (fn [[dest prise]] (prises prise)))
+       (mapcat (fn [[dest prise]]
+                 (let [n-trajet (conj trajet dest)
+                       n-prises (conj prises prise)]
+                   (if-let [rs (seq (rafle-pion (echange damier depart dest)
+                                                dest n-trajet n-prises))]
+                     rs
+                     [[n-trajet n-prises]]
+                     ))))))
+
+(defn rafle-dame [damier depart trajet prises]
+  #_(println ">" depart trajet prises)
+  (->> DIRS
+       (map (fn [dir] (get-diag damier depart dir)))
+       (map (fn [diago] (prise-dame damier diago)))
+       (remove nil?)
+       (apply concat)
+       (remove (fn [[dest prise]] (prises prise)))
+       (mapcat (fn [[dest prise]]
+                 (let [n-trajet (conj trajet dest)
+                       n-prises (conj prises prise)]
+                   (if-let [rs (seq (rafle-dame (echange damier depart dest)
+                                                dest n-trajet n-prises))]
+                     rs
+                     [[n-trajet n-prises]]
+                     ))))))
+
+(defn joue-pion [damier depart]
+  (if-let [rafles (seq (rafle-pion damier depart [depart] #{}))]
+    (->> rafles
+         (group-by (fn [[_ prises]] (count prises)))
+         (apply max-key first)
+         )
+    (let [x (get-in damier depart)]
+      (let [coups (->> (cond (blanc? x) DIRS_N
+                             (noir?  x) DIRS_S)
+                       (mapcat (fn [dir] (depl-pion damier (get-diag damier depart dir))))
+                       vec
+                       )]
+        (when (seq coups) [0 coups])))))
+
+(defn joue-dame [damier depart]
+  (if-let [rafles (seq (rafle-dame damier depart [depart] #{}))]
+    (->> rafles
+         (group-by (fn [[_ prises]] (count prises)))
+         (apply max-key first)
+         )
+    (let [x (get-in damier depart)]
+      (let [coups (->> DIRS
+                       (mapcat (fn [dir] (depl-dame damier (get-diag damier depart dir))))
+                       vec
+                       )]
+        (when (seq coups) [0 coups])))))
+
+(defn meilleurs-coups [damier sel-fn]
+  (->> (for [r (range 10) c (range 10)] [r c])
+       (filter (fn [pos] (sel-fn (get-in damier pos))))
+       (map (fn [pos]
+              (if (pion? (get-in damier pos))
+                (joue-pion damier pos)
+                (joue-dame damier pos))))
+       (remove nil?)
+       (reduce (fn [[pmax coups-max] [p coups]]
+                 (cond (< p pmax) [pmax coups-max]
+                       (> p pmax) [p coups]
+                       :else      [p (concat coups-max coups)]))
+               [0 []])))
+
+(defn mod-damier [damier [trajet prises]]
+  (let [dest (last trajet)]
+    (reduce (fn [dm p] (assoc-in dm p \space))
+            (-> damier
+                (echange (first trajet) dest)
+                ((fn [dm] (cond (and (== 0 (first dest))
+                                      (blanc? (get-in dm dest)))
+                                 (assoc-in dm dest \B)
+                                 (and (== 9 (first dest))
+                                      (noir? (get-in dm dest)))
+                                 (assoc-in dm dest \N)
+                                 :else dm
+                                 ))))
+            prises)))
 
 (def d1
   [
@@ -129,46 +228,38 @@
 
 (def d2
   [
-   [nil    \space nil    \B     nil    \N     nil    \space nil    \space]
+   [nil    \n     nil    \B     nil    \N     nil    \space nil    \space]
    [\space nil    \space nil    \space nil    \B     nil    \space nil  ]
-   [nil    \space nil    \n     nil    \n     nil    \space nil    \space]
+   [nil    \space nil    \n     nil    \n     nil    \n     nil    \space]
    [\space nil    \space nil    \space nil    \space nil    \b     nil  ]
-   [nil    \space nil    \space nil    \space nil    \space nil    \space]
+   [nil    \n     nil    \n     nil    \space nil    \n     nil    \space]
    [\space nil    \space nil    \space nil    \space nil    \space nil  ]
-   [nil    \space nil    \space nil    \space nil    \space nil    \space]
+   [nil    \space nil    \space nil    \space nil    \n     nil    \space]
    [\space nil    \space nil    \space nil    \space nil    \space nil  ]
-   [nil    \space nil    \space nil    \space nil    \space nil    \space]
-   [\space nil    \space nil    \space nil    \space nil    \space nil  ]
+   [nil    \space nil    \n     nil    \n     nil    \space nil    \n   ]
+   [\space nil    \space nil    \b     nil    \space nil    \space nil  ]
    ])
 
 
 ;;-----------------------------------------------------------------------------------
 
-;; (defn deplacement-pion [damier [r c]]
-;;   (let [x (get-in damier [r c])]
-;;     (cond (noir? x) (->> [[(inc r) (dec c)] [(inc r) (inc c)]]
-;;                          (filter (fn [rc]
-;;                                    (and (dans-damier? rc)
-;;                                         (libre? (get-in damier rc))))))
-;;           (blanc? x) (->> [[(dec r) (dec c)] [(dec r) (inc c)]]
-;;                           (filter (fn [rc]
-;;                                     (and (dans-damier? rc)
-;;                                          (libre? (get-in damier rc))))))
-;;           :else nil)))
+(defn print-damier [damier]
+  (doseq [row damier]
+    (println (apply str (map {\B \u26c3
+                        \N \u26c1
+                        \b \u26c2
+                        \n \u26c0
+                        nil \u2588
+                        \space \space}
+                       row)))))
 
-;; (defn prise-pion [damier [r c]]
-;;   (let [x (get-in damier [r c])]
-;;     (->> (for [ri [-1 1] ci [-1 1]
-;;                :let [r2 (+ r ri ri) c2 (+ c ci ci)]
-;;                :when (and (dans-damier? [r2 c2])
-;;                           (libre? (get-in damier [r2 c2])))
-;;                :let [r1 (+ r ri) c1 (+ c ci)
-;;                      y (get-in damier [r1 c1])]
-;;                :when (or (and (blanc? x) (noir? y))
-;;                          (and (noir? x) (blanc? y)))]
-;;            [[r1 c1] [r2 c2]]))))
-
-(defn -main
-  "I don't do a whole lot ... yet."
-  [& args]
-  (println "Hello, World!"))
+(defn -main [& args]
+  (loop [damier d1
+         sel-fn blanc?]
+    (print-damier damier)
+    (read-line)
+    #_(println)
+    (let [[_ coups] (meilleurs-coups damier sel-fn)
+          coup (nth coups (rand-int (count coups)))]
+      (recur (mod-damier damier coup)
+             (if (= sel-fn blanc?) noir? blanc?)))))
