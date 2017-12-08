@@ -253,8 +253,10 @@
                         \space \space}
                        row)))))
 
+
 (defn -main [& args]
   (loop [damier d1
+
          sel-fn blanc?]
     (print-damier damier)
     (read-line)
